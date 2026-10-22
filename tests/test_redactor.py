@@ -25,6 +25,87 @@ def sample_document(count=3):
 
 
 class ExportTests(unittest.TestCase):
+    def test_email_reduces_dpi_only_when_needed(self):
+        source=sample_document(1)
+        with tempfile.TemporaryDirectory() as folder:
+            small=Path(folder)/'150.pdf'
+            large=Path(folder)/'200.pdf'
+            app.export_pdf(source,[[]],small,dpi=150,email=True)
+            app.export_pdf(source,[[]],large,dpi=200,email=True)
+            self.assertGreater(large.stat().st_size,small.stat().st_size)
+            limit=(large.stat().st_size+small.stat().st_size)//2
+            result=app.export_pdf(source,[[]],Path(folder)/'adaptive.pdf',email=True,limit=limit)
+            self.assertEqual(result['dpi'],150)
+            self.assertEqual(len(result['files']),1)
+            self.assertLessEqual(result['sizes'][0],limit)
+        source.close()
+
+    def test_email_compression_keeps_redaction_and_fits_limit(self):
+        source=sample_document(2)
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/'email.pdf'
+            result=app.export_pdf(source,[[[.05,.05,.7,.2]] for _ in source],target,email=True)
+            self.assertEqual(result['files'],[str(target)])
+            self.assertLessEqual(target.stat().st_size,app.EMAIL_LIMIT)
+            with app.pdf.open(target) as out:
+                self.assertEqual(len(out),2)
+                self.assertFalse(out[0].get_text())
+                self.assertEqual(out.embfile_count(),0)
+                self.assertIn('DCTDecode',str(out[0].get_images()))
+                image=app.page_image(out[0],72)
+                self.assertLess(max(image.getpixel((60,60))),10)
+        source.close()
+
+    def test_email_splits_without_overwriting_and_preserves_all_pages(self):
+        source=app.pdf.open()
+        encoded_sizes=[]
+        for i in range(4):
+            image=app.Image.effect_noise((750,1000),64).convert('RGB')
+            app.ImageDraw.Draw(image).text((40,300),f'SYNTHETIC PAGE {i+1}',fill='red')
+            app.ImageDraw.Draw(image).rectangle((30,850,300,950),fill=(30+50*i,50,150))
+            buf=io.BytesIO();image.save(buf,format='PNG')
+            page=source.new_page(width=360,height=480)
+            page.insert_image(page.rect,stream=buf.getvalue())
+            jpeg=io.BytesIO();image.save(jpeg,format='JPEG',quality=80,subsampling=0)
+            encoded_sizes.append(len(jpeg.getvalue()))
+        limit=max(encoded_sizes)+80_000
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/'email.pdf'
+            target.write_bytes(b'EXISTING COMBINED FILE')
+            # Protect an existing part name as well.
+            existing=Path(folder)/'email-part-01-of-04.pdf'
+            existing.write_bytes(b'EXISTING PART')
+            result=app.export_pdf(source,[[[.05,.05,.7,.2]] for _ in source],target,dpi=150,email=True,limit=limit)
+            self.assertGreater(len(result['files']),1)
+            self.assertEqual(target.read_bytes(),b'EXISTING COMBINED FILE')
+            self.assertEqual(existing.read_bytes(),b'EXISTING PART')
+            total=0
+            for file in result['files']:
+                self.assertLessEqual(Path(file).stat().st_size,limit)
+                with app.pdf.open(file) as part:
+                    self.assertFalse(any(page.get_text() for page in part))
+                    image=app.page_image(part[0],72)
+                    self.assertLess(max(image.getpixel((60,60))),10)
+                    for page in part:
+                        red,green,blue=app.page_image(page,72).getpixel((100,430))
+                        self.assertLess(abs(red-(30+50*total)),10)
+                        self.assertLess(abs(blue-150),10)
+                        total+=1
+            self.assertEqual(total,4)
+            self.assertFalse(list(Path(folder).glob('.redacted-*')))
+        source.close()
+
+    def test_unattainable_email_limit_preserves_destination(self):
+        source=sample_document(1)
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/'email.pdf'
+            target.write_bytes(b'EXISTING OUTPUT')
+            with self.assertRaises(ValueError):
+                app.export_pdf(source,[[]],target,dpi=150,email=True,limit=100)
+            self.assertEqual(target.read_bytes(),b'EXISTING OUTPUT')
+            self.assertFalse(list(Path(folder).glob('.redacted-*')))
+        source.close()
+
     def test_fresh_pdf_has_only_burned_pixels(self):
         source=sample_document()
         original=source.tobytes()
@@ -144,7 +225,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(self.ui.profile.get(),'Bank statement')
 
     def test_worker_keeps_event_loop_alive(self):
-        with tempfile.TemporaryDirectory() as folder,patch.object(app.messagebox,'showinfo'),patch.object(app.messagebox,'showerror') as error:
+        with tempfile.TemporaryDirectory() as folder,patch.object(app.messagebox,'showinfo') as info,patch.object(app.messagebox,'showerror') as error:
             ticks=[]
             self.ui.start_export(Path(folder)/'export.pdf')
             def heartbeat():
@@ -159,6 +240,7 @@ class ReviewTests(unittest.TestCase):
             self.assertFalse(self.ui.saving)
             self.assertGreater(len(ticks),2)
             error.assert_not_called()
+            self.assertIn('MB',info.call_args.args[1])
 
 
 class OCRTests(unittest.TestCase):

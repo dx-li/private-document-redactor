@@ -63,18 +63,32 @@ def burn_boxes(image, boxes):
     return image
 
 
-def export_pdf(source, boxes, destination, dpi=200, progress=None):
+EMAIL_LIMIT = 18_000_000
+
+
+class AttachmentTooLargeError(ValueError):
+    pass
+
+
+def export_pdf(source, boxes, destination, dpi=200, progress=None, email=False, limit=EMAIL_LIMIT):
     """Copy only rendered, redacted pixels into a new PDF, never source objects."""
     out = pdf.open()
     temporary = None
     try:
         for i, page in enumerate(source):
             image = burn_boxes(page_image(page, dpi), boxes[i])
-            # Pass only burned pixels, avoiding a PNG encode/decode round trip.
-            pixels = pdf.Pixmap(pdf.csRGB, image.width, image.height, image.tobytes(), False)
             new = out.new_page(width=page.rect.width, height=page.rect.height)
-            new.insert_image(new.rect, pixmap=pixels)
-            del pixels, image
+            if email:
+                # Encode only AFTER burning the boxes: JPEG never sees any
+                # original pixels from inside a redacted area.
+                buf=io.BytesIO()
+                image.save(buf,format='JPEG',quality=85 if dpi>=200 else 80,subsampling=0)
+                new.insert_image(new.rect,stream=buf.getvalue())
+            else:
+                pixels = pdf.Pixmap(pdf.csRGB, image.width, image.height, image.tobytes(), False)
+                new.insert_image(new.rect, pixmap=pixels)
+                del pixels
+            del image
             if progress:
                 progress(f'Preparing page {i+1} of {len(source)}', i+1)
         destination = Path(destination)
@@ -83,19 +97,92 @@ def export_pdf(source, boxes, destination, dpi=200, progress=None):
         if progress:
             progress('Compressing and checking the PDF...', len(source))
         out.save(temporary, garbage=3, deflate=True)
-        out.close()
         with pdf.open(temporary) as check:
             if len(check) != len(source) or any(p.get_text().strip() for p in check):
                 raise ValueError('Export verification failed.')
             if check.embfile_count() or any(list(p.widgets() or []) or list(p.annots() or []) for p in check):
                 raise ValueError('Unexpected embedded content in export.')
+        if email and Path(temporary).stat().st_size>limit:
+            if dpi>150:
+                if progress:
+                    progress('Optimizing attachment size at 150 DPI...',0)
+                return export_pdf(source,boxes,destination,150,progress,True,limit)
+            if progress:
+                progress('Splitting into email-sized parts...',0)
+            return split_email_pdf(out,destination,limit,progress)
         os.replace(temporary, destination)
         temporary = None
+        return {'files':[str(destination)],'sizes':[destination.stat().st_size],'dpi':dpi,'email':email}
     finally:
         if not out.is_closed:
             out.close()
         if temporary and os.path.exists(temporary):
             os.remove(temporary)
+
+
+def split_email_pdf(redacted, destination, limit, progress=None):
+    """Split an already-sanitized PDF; never copy objects from the original."""
+    destination=Path(destination)
+    groups=[]
+    start=0
+    estimated=4096
+    for i,page in enumerate(redacted):
+        cost=4096+sum(len(redacted.xref_stream_raw(item[0])) for item in page.get_images())
+        if i>start and estimated+cost>limit:
+            groups.append((start,i-1))
+            start=i
+            estimated=4096
+        estimated+=cost
+    groups.append((start,len(redacted)-1))
+    staged=[]
+    created=[]
+    def stage(first,last):
+        fd,path=tempfile.mkstemp(prefix='.redacted-',suffix='.pdf',dir=destination.parent)
+        os.close(fd)
+        try:
+            with pdf.open() as part:
+                part.insert_pdf(redacted,from_page=first,to_page=last)
+                part.save(path,garbage=3,deflate=True)
+            size=Path(path).stat().st_size
+            if size>limit:
+                os.remove(path)
+                if first==last:
+                    raise AttachmentTooLargeError('A single page exceeds the attachment size limit at readable quality. Crop or resize that scan, or use a non-email export.')
+                middle=(first+last)//2
+                stage(first,middle)
+                stage(middle+1,last)
+                return
+            with pdf.open(path) as check:
+                if len(check)!=last-first+1 or check.embfile_count() or any(p.get_text().strip() or list(p.annots() or []) or list(p.widgets() or []) for p in check):
+                    raise ValueError('Part verification failed.')
+            staged.append((path,size))
+        except Exception:
+            if os.path.exists(path):os.remove(path)
+            raise
+    try:
+        for first,last in groups:
+            stage(first,last)
+        suffix=0
+        while True:
+            prefix=destination.stem if suffix==0 else f'{destination.stem}-email-{suffix}'
+            paths=[destination.with_name(f'{prefix}-part-{i+1:02d}-of-{len(staged):02d}.pdf') for i in range(len(staged))]
+            if not any(path.exists() for path in paths):break
+            suffix+=1
+        for i,((temporary,size),path) in enumerate(zip(staged,paths)):
+            # Exclusive creation also protects against a file appearing after
+            # the name check. Roll back only new parts if publication fails.
+            with open(temporary,'rb') as incoming,open(path,'xb') as outgoing:
+                created.append(path)
+                while chunk:=incoming.read(1024*1024):outgoing.write(chunk)
+            if progress:progress(f'Saved email part {i+1} of {len(staged)}',len(redacted))
+        return {'files':[str(path) for path in paths],'sizes':[size for _,size in staged],'dpi':150,'email':True}
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        for path,_ in staged:
+            Path(path).unlink(missing_ok=True)
 
 
 def validate_template(data, document):
@@ -118,7 +205,7 @@ def validate_template(data, document):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('Private Document Redactor | Offline | 3.0')
+        root.title('Private Document Redactor | Offline | 3.1')
         root.geometry('1180x850')
         root.minsize(960, 680)
         root.configure(bg='#f4f3ef')
@@ -157,8 +244,8 @@ class App:
         selector.pack(side='left')
         selector.bind('<<ComboboxSelected>>', self.profile_changed)
         ttk.Label(preset,text='Save quality:').pack(side='left',padx=(24,10))
-        self.quality = tk.StringVar(value='Standard (200 DPI)')
-        ttk.Combobox(preset,textvariable=self.quality,values=['Standard (200 DPI)','Fine (300 DPI)'],state='readonly',width=22).pack(side='left')
+        self.quality = tk.StringVar(value='Email (18 MB per PDF)')
+        ttk.Combobox(preset,textvariable=self.quality,values=['Email (18 MB per PDF)','Standard (200 DPI)','Fine (300 DPI)'],state='readonly',width=23).pack(side='left')
         tools = ttk.Frame(root, padding=(24, 0, 24, 12))
         tools.pack(fill='x')
         for label, command in [('Open document', self.open), ('Load template', self.load_template), ('Save template', self.save_template), ('Undo', self.undo), ('Redo', self.redo), ('Clear page', self.clear)]:
@@ -675,7 +762,8 @@ class App:
         try:
             snapshot = self.doc.tobytes(encryption=pdf.PDF_ENCRYPT_NONE) if self.doc.is_pdf else self.doc.convert_to_pdf()
             settings = json.dumps({'boxes':self.boxes,'destination':str(path),
-                                   'dpi':300 if self.quality.get().startswith('Fine') else 200}).encode()+b'\n'
+                                   'dpi':300 if self.quality.get().startswith('Fine') else 200,
+                                   'email':self.quality.get().startswith('Email')}).encode()+b'\n'
         except Exception as e:
             dialog.destroy()
             self.saving=False
@@ -705,6 +793,7 @@ class App:
             except Exception:
                 results.put({'done':True,'ok':False})
         def poll():
+            nonlocal export_result
             while True:
                 try:
                     event=results.get_nowait()
@@ -716,12 +805,27 @@ class App:
                     dialog.destroy()
                     if event.get('ok'):
                         self.dirty=False
-                        messagebox.showinfo('Redacted copy saved','Saved and checked for hidden text and attachments.\n\nOpen the saved PDF locally and inspect every page before submitting it. The PDF is image-only; text cannot be selected.')
+                        files=export_result.get('files',[])
+                        sizes=export_result.get('sizes',[])
+                        summary='\n'.join(f'{Path(name).name}: {size/1_000_000:.2f} MB' for name,size in zip(files,sizes))
+                        if len(files)>1:
+                            summary+='\n\nSplit into email-sized parts. Send parts in separate emails; attaching them all together can still exceed the limit. The originally selected filename was not overwritten.'
+                        elif sizes and sizes[0]>EMAIL_LIMIT:
+                            summary+='\n\nThis file may be too large for email. Choose Email quality to compress and split it.'
+                        summary+=f"\n\nSaved at {export_result.get('dpi',200)} DPI. Open and inspect every saved page before submitting."
+                        messagebox.showinfo('Redacted copy saved',summary)
                     else:
-                        messagebox.showerror('Could not save PDF','Export failed. Your original and any previous output were preserved. Check free space and folder permissions, then try again.')
+                        messagebox.showerror('Could not save PDF',export_result.get('error','Export failed. Your original and any previous output were preserved. Check free space and folder permissions, then try again.'))
                     return
+                if 'result' in event:
+                    export_result=event['result']
+                    continue
+                if 'error' in event:
+                    export_result['error']=event['error']
+                    continue
                 label.configure(text=event.get('message','Saving...'))
                 bar.configure(value=event.get('page',0))
+        export_result={}
         threading.Thread(target=worker,daemon=True).start()
         self.root.after(100,poll)
 
@@ -734,7 +838,11 @@ if __name__ == '__main__':
             def report(message,page):
                 print(json.dumps({'message':message,'page':page}),flush=True)
             with pdf.open(stream=data,filetype='pdf') as source:
-                export_pdf(source,settings['boxes'],settings['destination'],settings['dpi'],report)
+                result=export_pdf(source,settings['boxes'],settings['destination'],settings['dpi'],report,settings.get('email',False))
+                print(json.dumps({'result':result}),flush=True)
+        except AttachmentTooLargeError:
+            print(json.dumps({'error':'One page is too large for email at 150 DPI. No output was replaced. Crop or resize that scan, or use Standard/Fine export.'}),flush=True)
+            sys.exit(1)
         except Exception:
             sys.exit(1)
     else:
