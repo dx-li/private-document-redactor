@@ -1,0 +1,35 @@
+name: Windows portable build
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - run: python setup_local.py
+      - run: python -m unittest discover -s tests -v
+      - run: python tools/build_windows.py
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: windows-portable
+          path: |
+            dist/PrivateDocumentRedactor-Windows-x64.zip
+            dist/PrivateDocumentRedactor-source.zip
+            dist/SHA256SUMS.txt
+      - name: Prepare draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG dist/PrivateDocumentRedactor-Windows-x64.zip dist/PrivateDocumentRedactor-source.zip dist/SHA256SUMS.txt --draft --verify-tag --title "Private Document Redactor $env:RELEASE_TAG" --notes "Windows x64 portable build. Extract the entire ZIP and open PrivateDocumentRedactor.exe. No Python installation is needed. Manual redaction and English OCR work offline; the local AI model is an optional separate download. Unsigned build. Includes matching source and SHA-256 checksums."

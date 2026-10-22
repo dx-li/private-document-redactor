@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageTk
 import local_ai
 import local_ocr
 import profiles
+from runtime_paths import worker_command
 
 
 def ground_suggestion(page, item):
@@ -205,7 +206,7 @@ def validate_template(data, document):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('Private Document Redactor | Offline | 3.1')
+        root.title('Private Document Redactor | Offline | 3.2')
         root.geometry('1180x850')
         root.minsize(960, 680)
         root.configure(bg='#f4f3ef')
@@ -771,7 +772,7 @@ class App:
             return
         def worker():
             try:
-                process = subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'--export-worker'],
+                process = subprocess.Popen(worker_command('--export-worker'),
                     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 def feed():
@@ -830,8 +831,20 @@ class App:
         self.root.after(100,poll)
 
 
-if __name__ == '__main__':
-    if '--export-worker' in sys.argv:
+def main():
+    if '--ocr-worker' in sys.argv:
+        try:
+            words=local_ocr.recognize(sys.stdin.buffer.read())
+            sys.stdout.buffer.write(json.dumps(words).encode('utf-8'))
+        except Exception:
+            sys.exit(1)
+    elif '--setup-ai' in sys.argv:
+        import setup_local
+        setup_local.setup(ai=True)
+    elif '--self-test' in sys.argv:
+        from frozen_selftest import run
+        run()
+    elif '--export-worker' in sys.argv:
         try:
             settings=json.loads(sys.stdin.buffer.readline())
             data=sys.stdin.buffer.read()
@@ -848,4 +861,10 @@ if __name__ == '__main__':
     else:
         root = tk.Tk()
         App(root)
+        if '--smoke-gui' in sys.argv:
+            root.after(1000,root.destroy)
         root.mainloop()
+
+
+if __name__ == '__main__':
+    main()

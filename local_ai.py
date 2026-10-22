@@ -7,8 +7,9 @@ import subprocess
 import time
 import urllib.request
 import profiles
+from runtime_paths import APP_DIR
 
-BASE = Path(__file__).resolve().parent
+BASE = APP_DIR
 HOST = 'http://127.0.0.1:11439'
 MODEL = 'qwen3-vl:2b-instruct'
 # Disable proxy discovery, including system proxies, for document requests.

@@ -2,7 +2,13 @@
 
 A local desktop tool for redacting PDFs and scanned images. Draw boxes, use local OCR to locate sensitive fields, review every page, and export a fresh PDF containing only the redacted page images.
 
-## Install on Windows
+## Windows download (no Python required)
+
+Open [Releases](../../releases/latest), download **PrivateDocumentRedactor-Windows-x64.zip**, and extract the entire folder. Double-click **PrivateDocumentRedactor.exe**. Keep **RedactorWorker.exe** and the **_internal** folder beside it. Manual redaction and English OCR work offline immediately. The release includes SHA-256 checksums and a matching source archive. The portable build is unsigned.
+
+For optional local vision suggestions, run the included **Setup Local AI.cmd** once. The runtime/model download is roughly 4 GB and is not included in the portable ZIP. Extract the app to a folder you can write to before setting up AI.
+
+## Run from source on Windows
 
 1. Install **Python 3.12** from [python.org](https://www.python.org/downloads/) with tkinter and the Python launcher.
 2. Download or clone this repository and unzip it into a local folder.
@@ -43,6 +49,8 @@ The application does not provide automatic legal compliance or a guarantee that 
 ## Tests
 
 With dependencies installed, run `python -m unittest discover -s tests -v`. Tests generate synthetic data locally; no personal documents are included. OCR integration tests run when the English OCR data has been installed.
+
+To build the portable app on Windows, install `requirements.txt` and `requirements-build.txt`, then run `python tools/build_windows.py`. The build runs packaged OCR/export and GUI smoke checks before creating the ZIP. Tagged builds run on GitHub Actions and prepare a draft release for verification before publication.
 
 ## License
 

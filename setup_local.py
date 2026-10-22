@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 import urllib.request
 import zipfile
+from runtime_paths import APP_DIR,RESOURCE_DIR
 
-BASE=Path(__file__).resolve().parent
+BASE=APP_DIR
 OCR_URL='https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata'
 OCR_SHA='7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2'
 
@@ -26,7 +27,7 @@ def download(url,destination,sha=None):
         raise RuntimeError('Download checksum mismatch. Please retry setup.')
 
 def setup(ai=False):
-    target=BASE/'tessdata/eng.traineddata'
+    target=RESOURCE_DIR/'tessdata/eng.traineddata'
     if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest()!=OCR_SHA:
         print('Downloading English OCR data (about 4 MB)...',flush=True)
         download(OCR_URL,target,OCR_SHA)

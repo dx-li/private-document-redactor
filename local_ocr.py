@@ -9,6 +9,7 @@ import re
 import subprocess
 import pymupdf as pdf
 import profiles
+from runtime_paths import RESOURCE_DIR,worker_command
 
 
 def normalize(text):
@@ -22,7 +23,7 @@ def recognize(png):
         with pdf.open(stream=image.convert_to_pdf(), filetype='pdf') as doc:
             page = doc[0]
             tp = page.get_textpage_ocr(language='eng', dpi=200, full=True,
-                                       tessdata=str(BASE / 'tessdata'))
+                                       tessdata=str(RESOURCE_DIR / 'tessdata'))
             words = page.get_text('words', textpage=tp)
             return [{'text':w[4], 'box':[w[0]/page.rect.width,w[1]/page.rect.height,
                     w[2]/page.rect.width,w[3]/page.rect.height],
@@ -30,7 +31,7 @@ def recognize(png):
 
 
 def run(png):
-    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--worker'],
+    result = subprocess.run(worker_command('--ocr-worker'),
         input=png, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0), timeout=180)
     if result.returncode:
